@@ -1,0 +1,11 @@
+---
+- name: reload NGINX
+  command: nginx -t
+  register: zabbix_nginx_cfg_check
+  notify: reload NGINX real
+
+- name: reload NGINX real
+  service:
+    name: "{{ zabbix_nginx_service }}"
+    state: reloaded
+  when: zabbix_nginx_cfg_check

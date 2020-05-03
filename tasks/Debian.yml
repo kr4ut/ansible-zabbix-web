@@ -64,3 +64,6 @@
   vars:
     zabbix_apache_servername: "{{ zabbix_websrv_servername }}"
   when: zabbix_websrv == 'apache'
+
+- include_tasks: nginx_Debian.yml
+  when: zabbix_websrv == 'nginx'

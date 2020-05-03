@@ -1,0 +1,133 @@
+---
+- name: "NGINX | set distro specific variables"
+  set_fact:
+    zabbix_nginx_config_path: /etc/nginx
+    zabbix_nginx_log_path: /var/log/nginx
+    zabbix_nginx_service: nginx
+    zabbix_htpasswd_file: /etc/zabbix/zabbix.htpasswd
+    zabbix_nginx_ssl_auto_cert: /etc/ssl/certs/ssl-cert-snakeoil.pem
+    zabbix_nginx_ssl_auto_key: /etc/ssl/private/ssl-cert-snakeoil.key
+
+- name: "NGINX | stop and disable Apache service"
+  service:
+    name: apache2
+    state: stopped
+    enabled: no
+  tags:
+    - zabbix-web
+
+# don't go for HTTP2 with the nginx-full yet due to:
+# https://support.zabbix.com/browse/ZBXNEXT-4670
+- name: "NGINX | install webserver packages"
+  apt:
+    state: present
+    name:
+      - nginx-light
+      - ssl-cert
+
+- name: "NGINX | start and enable webserver service"
+  service:
+    name: "{{ zabbix_nginx_service }}"
+    state: started
+    enabled: yes
+
+- name: "PHP | install PHP FPM daemon"
+  # don't specifiy distro release dependent version
+  apt:
+    state: present
+    name: 
+      - php-fpm
+
+# TODO need distro release dependent version number
+#- name: PHP | start and enable FPM daemon service
+#  service:
+#    name: php-fpm
+#    state: started
+#    enabled: yes
+
+- name: "NGINX | check for Let's Encrypt certificate"
+  stat:
+    path: "/etc/letsencrypt/live/{{ zabbix_websrv_servername }}/fullchain.pem"
+  register: zabbix_letsencrypt_cert
+  failed_when: false
+
+- name: "NGINX | configure webserver"
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ zabbix_nginx_config_path }}/{{ item.dest }}"
+  with_items:
+    - { src: "nginx_vhost.conf.j2", dest: "sites-available/default" }
+    - { src: "nginx_letsencrypt.conf.j2", dest: "snippets/letsencrypt-acme.conf" }
+  loop_control:
+    label: "{{ zabbix_nginx_config_path }}/{{ item.dest }}"
+  notify: reload NGINX
+
+- name: "NGINX | check installed version"
+  shell: nginx -v 2>&1 | awk '{print $3}' | awk -F/ '{print $2}'
+  register: zabbix_nginx_version
+  changed_when: no
+  check_mode: no
+
+- name: "NGINX | upgrade TLS security to TLS1.2 only"
+  lineinfile:
+    path: /etc/nginx/nginx.conf
+    regex: '^\tssl_protocols.*$'
+    line: '	ssl_protocols TLSv1.2; # Dropping TLSv1, TLSv1.1 & SSLv3'
+  notify: reload NGINX
+  when: zabbix_nginx_version is defined and zabbix_nginx_version.stdout is version('1.13', '<')
+
+- name: "NGINX | upgrade TLS security to TLS1.2 + TLS1.3"
+  lineinfile:
+    path: /etc/nginx/nginx.conf
+    regex: '^\tssl_protocols.*$'
+    line: '	ssl_protocols TLSv1.2 TLSv1.3; # Dropping TLSv1, TLSv1.1 & SSLv3'
+  notify: reload NGINX
+  when: zabbix_nginx_version is defined and zabbix_nginx_version.stdout is version('1.13', '>=')
+
+- name: "NGINX | check Python version and set prefix variable"
+  set_fact:
+    zabbix_python_prefix: "python{% if ansible_python_version is version_compare('3', '>=') %}3{% endif %}"
+  when: zabbix_websrv_http_auth is defined and zabbix_websrv_http_auth
+
+- name: "NGINX | install passlib for Python interpreter"
+  apt:
+    name: "{{ zabbix_python_prefix }}-passlib"
+    state: present
+  when: zabbix_websrv_http_auth is defined and zabbix_websrv_http_auth
+
+- name: "NGINX | setting HTTP authentication credentials"
+  htpasswd:
+    path: "{{ zabbix_htpasswd_file }}"
+    name: "{{ item.value.zabbix_htpasswd_user }}"
+    password: "{{ item.value.zabbix_htpasswd_pass }}"
+    state: present
+  loop_control:
+    label: "{{ item.value.zabbix_htpasswd_user }}"
+  with_dict: "{{ zabbix_htpasswd_users }}"
+  when: zabbix_websrv_http_auth is defined and zabbix_websrv_http_auth
+
+- name: "NGINX | check if zabbix_server_hostname is resolvable"
+  set_fact:
+    #zabbix_websrv_servername_ip: "{{ lookup('dig', 'qtype=A', '{{ zabbix_server_hostname }}')}}"
+    zabbix_websrv_servername_ip: "{{ lookup('dig', 'qtype=A', '{{ zabbix_websrv_servername }}')}}"
+  changed_when: zabbix_websrv_servername_ip != ansible_default_ipv4.address
+  register: zabbix_websrv_servername_resolve
+  when: zabbix_websrv_ssl_cert is not defined and zabbix_websrv_key_cert is not defined
+
+- name: "NGINX | check if certbot CLI is present"
+  shell: "certbot --version"
+  register: zabbix_cerbot_check
+  changed_when: zabbix_cerbot_check.rc != 0
+  check_mode: no
+
+- name: "NGINX | generate certs with certbot CLI"
+  # README needs second run to get used in templating
+  command: >
+    certbot --non-interactive certonly --expand
+    -a webroot --webroot-path=/var/www/letsencrypt
+    --email {{ zabbix_letsencrypt_account_email }} --agree-tos
+    -d  {{ zabbix_websrv_servername }}
+  args:
+    # assumes that privkey.pem will be also there
+    creates: "/etc/letsencrypt/live/{{ zabbix_websrv_servername }}/fullchain.pem"
+  when: zabbix_websrv_servername_resolve is not changed and zabbix_cerbot_check.rc == 0

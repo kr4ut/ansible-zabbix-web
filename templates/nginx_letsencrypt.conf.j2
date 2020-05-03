@@ -1,0 +1,7 @@
+location ^~ /.well-known/acme-challenge {
+  root {{ zabbix_letsencrypt_webroot | default('/var/www/letsencrypt') }};
+  # disable IP restrictions and HTTP auth
+  allow all;
+  default_type text/plain;
+  try_files $uri =404;
+}

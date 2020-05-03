@@ -1,0 +1,63 @@
+### redirect vhost
+server {
+  listen *:80 default_server;
+  server_tokens off;
+  server_name {{ zabbix_websrv_servername }};
+{# TODO add support for alias in zabbix_url_aliases #}
+  # Let's Encrypt
+  include {{ zabbix_nginx_config_path }}/snippets/letsencrypt-acme.conf;
+  location / { return 301 https://$host$request_uri; }
+}
+
+### application vhost
+server {
+  listen *:443 ssl default_server;
+  server_tokens off;
+  server_name {{ zabbix_websrv_servername }}{% for alias in zabbix_url_aliases %} {{ alias }}{% endfor %};
+  ## HTTPS
+  # global ssl_protocols and ssl_prefer_server_ciphers should be in nginx.conf
+  ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
+  #ssl_ecdh_curve secp384r1;
+{% if zabbix_websrv_ssl_cert is defined and zabbix_websrv_key_cert is defined %}
+  ssl_certificate {{ zabbix_websrv_ssl_cert }};
+  ssl_certificate_key {{ zabbix_websrv_key_cert }};
+{% elif zabbix_letsencrypt_cert.stat.exists %}
+  ssl_certificate /etc/letsencrypt/live/{{ zabbix_websrv_servername }}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/{{ zabbix_websrv_servername }}/privkey.pem;
+{% else %}
+  ssl_certificate {{ zabbix_nginx_ssl_auto_cert }};
+  ssl_certificate_key {{ zabbix_nginx_ssl_auto_key }};
+{% endif %}
+{% if zabbix_websrv_allowed_ips is defined and zabbix_websrv_allowed_ips %}
+  ## Whitelisted IPs 
+  satisfy  any;
+{% for ip in zabbix_websrv_allowed_ips | ipaddr %}
+  allow {{ ip }};
+{% endfor %}
+  deny   all;
+{% endif %}
+{% if zabbix_websrv_http_auth is defined and zabbix_websrv_http_auth %}
+  ### HTTP authentication
+  auth_basic "Restricted";
+  auth_basic_user_file {{ zabbix_htpasswd_file }};
+{% endif %}
+  ### Docroot and locations
+  root /usr/share/zabbix;
+  location / {
+    try_files $uri $uri/ /index.php?$args;
+    index index.php;
+  }
+  location ~ /\. {
+    deny all;
+    return 404; 
+  }
+  ### PHP processing
+  location ~ \.php$ {
+    include {{ zabbix_nginx_config_path }}/snippets/fastcgi-php.conf;
+{# TODO fix hardcoded version here #}
+    fastcgi_pass unix:/run/php/php7.2-fpm.sock;
+  }
+  ## Logging
+  access_log {{ zabbix_nginx_log_path }}/zabbix_access.log combined;
+  error_log {{ zabbix_nginx_log_path }}/zabbix_error.log warn;
+}
